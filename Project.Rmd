@@ -1,0 +1,367 @@
+---
+title: "U.S Retail Trade and Food Services TS Analysis"
+author: "Wanning Wang"
+output:
+     pdf_document:
+         latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,message =FALSE)
+library(tidyverse)
+library(sqldf)
+library(readxl)
+library(lubridate)
+library(abind)
+require(gridExtra)
+library(tseries)
+library(forecast)
+library(lmtest)
+```
+
+#### Introduction of the Data
+
+* This data is from U.S. Census Bureau Monthly Retail Trade Survey.  
+Source: https://www.census.gov/econ/currentdata/dbsearch?program=MRTS&startYear=2010&endYear=2019&categories=44X72&dataType=SM&geoLevel=US&notAdjusted=1&submit=GET+DATA&releaseScheduleId=
+
+* Data Background:  
+The Monthly Retail Trade Survey provides current estimates of sales at retail and food services stores and inventories held by retail stores.  
+Source: https://www.census.gov/econ/overview/re0400.html
+
+* Data Selection for Analysis:  
+The data for analysis contains the recent ten years of data from 2010_Jan-2019_Dec; for ten years, monthly data can mainly capture the trend and seasonal patterns of the national retail sales behavior. The value is the total sales value of retail trade and food services estimates each month.
+
+* Dataset Name:  
+44X72: Retail Trade and Food Services: U.S. Total — Not Seasonally Adjusted Sales - Monthly [Millions of Dollars]
+
+#### Purpose of Analysis:
+* The purpose is to carry out a time series analysis in order to explore the data features to see the seasonal and trend pattern over time. At the same time, explore and compare the performance of different forecasting methods.
+
+#### Final Model and Conclusions:
+* From the result based on AICc and evaluations between different models, we choose SARIMA(0,1,1)(2,1,2)[12] as the final forecasting model. In this analysis, I introduced the method of how we chose the best ARIMA model derived from different model selection methods based on AICc. This analysis also carried out a comparison of the forecast performance between ARIMA and the non-Arima model.
+
+### 1. Data Description and Transformation
+```{r,fig.align = "center",out.width = "35%",out.height="35%"}
+#par(mfrow=c(2,2))
+df <- read_excel("SeriesReport-MRTS.xls",skip = 7)
+value <- df$Value/1000
+retail_ts <- ts(value,frequency=12, start=2010)
+z=decompose(log(retail_ts),type="multiplicative")
+plot.ts(retail_ts,ylab="Sales[Billions of Dollars]",main="Monthly Sales for Retail and Food Service")
+
+## log tansformation to stablize
+#plot.ts(log(retail_ts),ylab="log-scale",main="After Log Tansformation")
+#plot(z)
+```
+
+* As we can see from the data, the data has both trend and seasonal components. The variance is increasing as time goes on. This might due to the seasonal hilidays. To stabilize the data, we would like to take a log transformation of the data. After taking the log, the data looks with stable variance.    
+
+```{r,fig.align = "center",out.width = "35%",out.height="35%"}
+plot.ts(log(retail_ts),ylab="log-scale",main="After Log Tansformation")
+```
+
+
+### 2. Identifying the ARIMA Model
+**Take differencing to make data stationary**
+```{r,fig.align = "center",out.width = "35%",out.height="35%"}
+# plot(decompose(retail_ts,type="multiplicative"))
+rt=diff(diff(log(retail_ts),12),1)
+plot(rt,ylab="diff(1,12)",main="Differenced Data at lag=(1,12)")
+
+# plot(ts(diff(diff(log(AirPassengers)),lag=12),frequency=12,start=c(1949,1)),
+# ylab="diff(1,12)",main="Differenced Data at lag=(1,12)")
+
+
+```
+
+**Test for stationarity**
+```{r,include=FALSE}
+adf.test(rt)
+```
+* Results from Augmented Dickey-Fuller Test:  
+Dickey-Fuller = -7.2671, Lag order = 4, p-value = 0.01
+alternative hypothesis: stationary
+
+* From the plot, we can see the data after stabilized and removed trend and seasonal component, it shows white noise. From the result of the Dickey-Fuller Test, we can see p-value less than 0.05; thus, we reject the null hypothesis of non-stationary.  
+
+**Plotting ACF and PACF**
+```{r,fig.align = "center",out.width = "60%",out.height="60%"}
+#plotting acf and pacf
+par(mfrow=c(1,2))
+acf(rt,lag.max=84,main="ACF-diff(1,12) log(Sales)")
+pacf(rt,lag.max=84,main="PACF-diff(1,12) log(Sales)")
+```
+* From the ACF and PACF we can see that ACF shows strong correlation at seasonal lags, and PACF shows decaying and has clustering patterns at seasonal lags, so we consider a seasonal arima model.  
+
+**Identify Order of the Model**  
+
+To identify the non-seasonal ARIMA component: ACF cuts-off at lag 1; PACF seems cuts-off at lag2 also decays to zero. Thus, we conside p=0,1,2, q=0,1
+
+To identify the seasonal ARIMA component: ACF decays to zero at seasonal lags, and PACF cuts-off at sesaonal lag 2. Thus, we consider P=0,2; Q=1,2 ; S=12
+
+Hence, possible SARIMA model: $(1,1,1)\times(0,1,2)_{12}$,$(0,1,1)\times(0,1,2)_{12}$,  $(0,1,1)\times(2,1,1)_{12}$, $(1,1,1)\times(2,1,1)_{12}$, $(2,1,1)\times(2,1,1)_{12}$,  $(0,1,1)\times(2,1,2)_{12}$,$(2,1,0)\times(2,1,1)_{12}$
+
+### 3. Model Building 
+Use Arima function fit model with different orders and seanonal orders, indentifing period=12 and lambda=0.  
+
+* fit <- Arima(retail_ts,order=c(0,1,1),seasonal = list(order=c(0,1,2),period=12),lambda=0)
+
+#### 3.1 Model Selection Based on AICc  
+```{r}
+fit.sarima.1 <- Arima(retail_ts,order=c(0,1,1),seasonal = list(order=c(0,1,2),period=12),lambda=0)
+#fit.sarima.1$aicc
+
+fit.sarima.2 <- Arima(retail_ts,order=c(1,1,1),seasonal = list(order=c(0,1,2),period=12),lambda=0)
+#fit.sarima.2$aicc
+
+#fit.sarima.3 <- Arima(retail_ts,order=c(2,1,1),seasonal = list(order=c(0,1,2),period=12),lambda=0)
+#fit.sarima.3$aicc
+
+#fit.sarima.4 <- Arima(retail_ts,order=c(1,1,0),seasonal = list(order=c(0,1,2),period=12),lambda=0)
+#fit.sarima.4$aicc
+
+#fit.sarima.5 <- Arima(retail_ts,order=c(2,1,0),seasonal = list(order=c(0,1,2),period=12),lambda=0)
+#fit.sarima.5$aicc
+
+fit.sarima.6 <- Arima(retail_ts,order=c(0,1,1),seasonal = list(order=c(2,1,1),period=12),lambda=0)
+#fit.sarima.6$aicc
+
+fit.sarima.7 <- Arima(retail_ts,order=c(1,1,1),seasonal = list(order=c(2,1,1),period=12),lambda=0)
+#fit.sarima.7$aicc
+
+fit.sarima.8 <- Arima(retail_ts,order=c(2,1,1),seasonal = list(order=c(2,1,1),period=12),lambda=0)
+#fit.sarima.8$aicc
+
+#fit.sarima.9 <- Arima(retail_ts,order=c(1,1,0),seasonal = list(order=c(2,1,1),period=12),lambda=0)
+#fit.sarima.9$aicc
+
+fit.sarima.10 <- Arima(retail_ts,order=c(0,1,1),seasonal = list(order=c(2,1,2),period=12),lambda=0)
+#fit.sarima.10$aicc
+
+fit.sarima.11 <- Arima(retail_ts,order=c(2,1,0),seasonal = list(order=c(2,1,1),period=12),lambda=0)
+#fit.sarima.11$aicc
+
+#fit.sarima.12 <- Arima(retail_ts,order=c(0,1,1),seasonal = list(order=c(1,1,4),period=12),lambda=0)
+#fit.sarima.12
+
+
+
+
+df1<-data.frame('SARIMA_Model'=c("(0,1,1)(0,1,2)[12]",
+                          "(1,1,1)(0,1,2)[12]",
+                        #"(2,1,1)(0,1,2)[12]",
+                        #"(1,1,0)(0,1,2)",
+                        #"(2,1,0)(0,1,2)[12]",
+                        "(0,1,1)(2,1,1)[12]",
+                        "(1,1,1)(2,1,1)[12]",
+                        "(2,1,1)(2,1,1)[12]",
+                        #"(1,1,0)(2,1,1)",
+                        "(0,1,1)(2,1,2)[12]",
+                        "(2,1,0)(2,1,1)[12]"),
+            'AICc'=c(fit.sarima.1$aicc,
+                     fit.sarima.2$aicc,
+                     #fit.sarima.3$aicc,
+                     #fit.sarima.4$aicc,
+                     #fit.sarima.5$aicc,
+                     fit.sarima.6$aicc,
+                     fit.sarima.7$aicc,
+                     fit.sarima.8$aicc,
+                     #fit.sarima.9$aicc,
+                     fit.sarima.10$aicc,
+                     fit.sarima.11$aicc
+                     ),
+            'BIC'=c(fit.sarima.1$bic,
+                     fit.sarima.2$bic,
+                     #fit.sarima.3$aicc,
+                     #fit.sarima.4$aicc,
+                     #fit.sarima.5$aicc,
+                     fit.sarima.6$bic,
+                     fit.sarima.7$bic,
+                     fit.sarima.8$bic,
+                     #fit.sarima.9$aicc,
+                     fit.sarima.10$bic,
+                     fit.sarima.11$bic
+                     ))
+df1 <- df1 %>% arrange(AICc)
+
+knitr::kable(df1,digits = 2,align = 'cl')
+#fit.sarima.11
+
+```
+
+Lowest AICc: ARIMA(0,1,1)(2,1,2)[12]  
+As we can see from the result, SARIM$(0,1,1)\times(2,1,2)_{12}$ has lowest AICc. IF we based on AICc, this one would be our best SARIMA model.
+
+
+#### 3.2 Auto Arima Model Selection
+
+* fit.auto= auto.arima(retail_ts,lambda = 0)  
+fit.auto$aicc
+```{r}
+fit.auto = auto.arima(retail_ts,lambda = 0)
+fit.auto$aicc
+```
+Interesting finding is that our SARIM$(0,1,1)\times(2,1,2)_{12}$ has lower AICc than using auto.arima function.
+
+#### 3.3 Subset ARMA Model Selection
+```{r,fig.align = "center",out.width = "45%",out.height="45%"}
+library(TSA)
+fit.subset <- armasubsets(y=rt ,nar=14,nma=14)
+plot(fit.subset)
+```
+From first row of the plot, we can see coefficients $\phi_1,\phi_2$ and $\theta_2,\theta_3,\theta_{12}$ are significant, so that we can also choose to fit a ARIMA(2,1,12) model with setting: 
+
+* seasonal=list(order=c(0,1,0),period=12)  
+fixed=c(NA,NA,0,NA,NA,rep(0,8),NA)  
+lambda=0
+
+```{r,include=FALSE}
+fit.sub = Arima(retail_ts,order=c(2,1,12),seasonal=list(order=c(0,1,0),period=12),fixed=c(NA,NA,0,NA,NA,rep(0,8),NA),lambda=0)
+fit.sub
+```
+
+AICc of the subset model: -583.01.  
+The AICc of the model selected from subset model selection method is higher than SARIM$(0,1,1)\times(2,1,2)_{12}$.
+
+### 4. Model Check -- Model Diagnostics
+**Residual checking:**  
+We check the residual of SARIM$(0,1,1)\times(2,1,2)_{12}$ to see if it is adequate model. We can use the Ljung-Box test to see if the residual is white noise, and we can also check the normality of the residuals via Q-Q Plot.  
+
+* Ljung-Box test:
+```{r,fig.align = "center",out.width = "50%",out.height="55%"}
+#par(mfrow=c(1,2))
+tsdiag(fit.sarima.10,gof.lag = 20)
+```
+
+* Q-Q Plot & Residual Plot:  
+```{r,fig.align = "center",out.width = "40%",out.height="40%"}
+par(mfrow=c(2,1))
+qqnorm(residuals(fit.sarima.10))
+qqline(residuals(fit.sarima.10))
+plot(fit.sarima.10$residuals,main="Residual Plot",ylab="Residuals")
+#fit.sarima.11
+```
+From the results we can see the residuals is white noise. The model is adequate.
+
+### 5. Parameter Estimation
+**SARIM$(0,1,1)\times(2,1,2)_{12}$ :**  
+```{r,fig.align = "center",out.width = "45%",out.height="45%"}
+fit.sarima.10
+```
+From the result we can see the coefficent for sma2 $\Theta_2=0.8478$ is not statistical significant since 0 is included the confidence interval of the estimate ($0.8478-1.96*0.489=-0.11,0.8478-1.96*0.489=1.8;$  CI:(-0.11,1.8)). All other coefficients - the estimates of the parameters are statistical sigificant.  
+
+* Parameter estimates: $\theta_1=-0.6618$, $\Phi_1=0.8253$, $\Phi_2=-0.8196$, $\Theta_1=-1.3168$, $\Theta_2=0.8478$
+
+### 6. Forecasting
+**SARIMA Forecast** 
+
+* We choose our selected model SARIM$(0,1,1)\times(2,1,2)_{12}$ based on AICc criteria to forecast future 12 month values.  
+```{r,fig.align = "center",out.width = "40%",out.height="40%"}
+arima.fcast <- forecast(fit.sarima.10,h=12)
+plot(arima.fcast,ylab="Sales[Billions of Dollars]",main="Sales Forecasts from ARIMA(0,1,1)(2,1,2)[12]")
+```
+
+
+
+**Holt-Winters Forecast**  
+
+* We also choose to forecast using Holtwinters method to compare.  
+```{r,fig.align = "center",out.width = "40%",out.height="40%"}
+library(forecast)
+fit = HoltWinters(retail_ts , seasonal = "multiplicative")
+hwfcast = forecast(fit, h=12)
+# hwfcast
+plot(hwfcast,ylab="Sales[Billions of Dollars]",main="Sales Forecasts from HoltWinters")
+```
+
+```{r,fig.align = "center",out.width = "50%",out.height="50%",include=FALSE}
+par(mfrow=c(1,2))
+plot(arima.fcast,ylab="Sales[Billions of Dollars]",main="Sales Forecasts from ARIMA(0,1,1)(2,1,2)[12]")
+plot(hwfcast,ylab="Sales[Billions of Dollars]",main="Sales Forecasts from HoltWinters")
+```
+
+
+Both forecast method give similar results. They follow the trend and seasonal patterns.
+
+**Forecasts Value SARIMA Vs. HoltWinters:**
+
+* Compared the forecasts values from the two model (2020-Jan to 2020-Dec):
+
+```{r,fig.align = "center",out.width = "45%",out.height="45%"}
+arima.m <- as.numeric(arima.fcast$mean)
+hw.m <- as.numeric(hwfcast$mean)
+df.p <- data.frame('Time' = c("Jan20","Feb20","Mar20","Apr20","May20","Jun20","Jul20","Aug20","Sep20","Oct20","Nov20","Dec20"),'SARIMA'=arima.m,'HoltWinters'=hw.m)
+
+df.p <- df.p %>% gather(key="Model",value="value",SARIMA,HoltWinters)
+
+ggplot(df.p)+geom_line(aes(x=Time,y=value,color = Model,group=Model), size = 1) +
+  scale_color_manual(values = c("#00AFBB", "#E7B800")) +
+scale_x_discrete(name = " ", limits = c("Jan20","Feb20","Mar20","Apr20","May20","Jun20","Jul20","Aug20","Sep20","Oct20","Nov20","Dec20"))+
+    labs(x="Month",y="Sales[Billions of Dollars]")+ ggtitle("Forecasts for 2020 SARIMA(0,1,1)(2,1,2)[12] VS HoltWinters") + theme(axis.text=element_text(size=10,face="bold"),axis.text.x=element_text(size=10,face="bold",angle = 30),
+        axis.title=element_text(size=10,face="bold"),
+        legend.text=element_text(size=10,face="bold"),
+        legend.title=element_text(size=10,face="bold"),
+        plot.title = element_text(face = "bold"),panel.background = element_rect(fill = "white"))
+```
+From the plot we can see SARIMA(0,1,1)(2,1,2)[12] model forecasts are lower than the HoltWinters forecast at some month. But generally, they are fairly consistent.
+
+
+### 7. Evaluation of Forecast Accuracy
+To compare their forecast accuracy, we use 2010-2018 data as training data and the last year(2019) as test set to compute the MAPE of the two models. Lower MAPE score means better forecast accuracy.
+```{r,fig.align = "center",out.width = "40%",out.height="40%"}
+train = retail_ts[1:108]
+test = retail_ts[109:120]
+
+sarima.fit <- Arima(train,order=c(0,1,1),seasonal = list(order=c(2,1,2),period=12),lambda=0)
+fcast.sa=forecast(sarima.fit,h=12)
+
+hw.fit <- HoltWinters(ts(train,frequency=12, start=2010),seasonal = "multiplicative")
+fcast.hw=forecast(hw.fit,h=12)
+
+err.sa=test-fcast.sa$mean
+err.hw=test-fcast.hw$mean
+
+mape.sa = mean(abs((err.sa*100)/test))
+mape.hw = mean(abs((err.hw*100)/test))
+
+# (0,1,1)(2,1,1)[12]
+df2<-data.frame('Model'=c("SARIMA (0,1,1)(2,1,2)[12]","HoltWinters"),
+        'MAPE'=c(mape.sa ,mape.hw))
+knitr::kable(df2,digits = 3,align = 'cl')
+
+```
+
+We can see SARIMA model has better forecast accuracy on the test data set.  
+
+* Visulize Forecasts from SARIMA, HoltWinters VS Actual Values  
+```{r,fig.align = "center",out.width = "45%",out.height="45%"}
+arima.p <- as.numeric(fcast.sa$mean)
+hw.p <- as.numeric(fcast.hw$mean)
+actual <- as.numeric(test)
+
+df.a <- data.frame('Time' = c("Jan19","Feb19","Mar19","Apr19","May19","Jun19","Jul19","Aug19","Sep19","Oct19","Nov19","Dec19"),'SARIMA'=arima.p,'HoltWinters'=hw.p,'Actual'=actual)
+
+df.a <- df.a %>% gather(key="Class",value="value",SARIMA,HoltWinters,Actual)
+
+col <- c("HoltWinters"="#00AFBB","SARIMA"="#E7B800","Actual"="red")
+
+ggplot(df.a)+geom_line(aes(x=Time,y=value,color =Class,group=Class), size = 1) +
+  scale_color_manual(values = col) +
+scale_x_discrete(name = " ", limits = c("Jan19","Feb19","Mar19","Apr19","May19","Jun19","Jul19","Aug19","Sep19","Oct19","Nov19","Dec19"))+
+    labs(x="Month",y="Sales[Billions of Dollars]")+ ggtitle("Forecasts Values VS Actual") + theme(axis.text=element_text(size=10,face="bold"),axis.text.x=element_text(size=10,face="bold",angle = 30),
+        axis.title=element_text(size=10,face="bold"),
+        legend.text=element_text(size=10,face="bold"),
+        legend.title=element_text(size=10,face="bold"),
+        plot.title = element_text(face = "bold"),panel.background = element_rect(fill = "white"))
+```
+
+* Holtwinters is the forecast value derived from Hlotwinters model, SARIMA is the forecast value derived from SARIMA(0,1,1)(2,1,2)[12] model, Actual is the value of the test data set.  
+* As we can see from the plot, before Oct forecasts value from SARIMA(0,1,1)(2,1,2)[12] model is more fit with the actual values. However, Nov and Dec the Holtwinters performs better.
+
+
+### Order of Minimum AICC AR Model
+```{r}
+auto.arima(residuals (fit.sarima.10),max.q=0)
+```
+
+
